@@ -158,11 +158,31 @@ invoiceSchema.pre('save', async function (next) {
         const date = new Date();
         const year = date.getFullYear().toString().slice(-2);
         const day = String(date.getDate()).padStart(2, '0');
-        const count = await mongoose.model('Invoice').countDocuments({
-            createdAt: { $gte: new Date().setHours(0, 0, 0, 0) } // Daily sequence
-        });
-        const seq = String(count + 1).padStart(4, '0');
-        this.invoiceNo = `INV/${year}/${day}${seq}`;
+        const prefix = `INV/${year}/${day}`;
+
+        try {
+            // Find the latest invoice for today using regex to be more robust than countDocuments
+            // This avoids issues if createdAt doesn't match the current day pattern (e.g. from seeding)
+            const lastInvoice = await mongoose.model('Invoice').findOne(
+                { invoiceNo: new RegExp(`^${prefix}`) },
+                { invoiceNo: 1 },
+                { sort: { invoiceNo: -1 } }
+            ).lean();
+
+            let nextSeq = 1;
+            if (lastInvoice && lastInvoice.invoiceNo) {
+                // Extract sequence from the end (last 4 digits)
+                const lastSeqText = lastInvoice.invoiceNo.slice(-4);
+                const lastSeq = parseInt(lastSeqText, 10);
+                if (!isNaN(lastSeq)) {
+                    nextSeq = lastSeq + 1;
+                }
+            }
+
+            this.invoiceNo = `${prefix}${String(nextSeq).padStart(4, '0')}`;
+        } catch (error) {
+            return next(error);
+        }
     }
     next();
 });

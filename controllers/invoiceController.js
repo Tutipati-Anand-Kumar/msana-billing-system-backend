@@ -109,18 +109,14 @@ export const createInvoice = async (req, res, next) => {
         const processedItems = [];
 
         for (const item of items) {
-            const product = await Product.findById(item.drug || item.product); // Handle both naming conventions
-
-            if (!product) {
-                return res.status(404).json({ message: `Product not found` });
+            let product = null;
+            if (item.drug || item.product) {
+                product = await Product.findById(item.drug || item.product);
             }
 
-            // Simple stock check (ignores batches for now in this controller version unless specified)
-            // TODO: In full FIFO implementation, we pick batches here.
-
-            const qty = Number(item.qty || item.quantity);
-            const rate = Number(item.unitRate || product.mrp || 0);
-            const gst = Number(item.gstPct || product.gstPercent || 0);
+            const qty = Number(item.qty || item.quantity || 0);
+            const rate = Number(item.unitRate || item.price || product?.mrp || product?.sellingPrice || 0);
+            const gst = Number(item.gstPct || item.gstPercent || product?.gstPercent || 0);
 
             const amount = rate * qty;
             const tax = amount * (gst / 100);
@@ -129,45 +125,58 @@ export const createInvoice = async (req, res, next) => {
             taxTotal += tax;
 
             processedItems.push({
-                drug: product._id,
-                batch: item.batch, // Assuming batch ID passed, else null (needs fix in Phase 3)
-                productName: product.name || product.brand,
+                drug: product?._id || null,
+                batch: item.batch || null,
+                productName: item.productName || item.name || product?.name || product?.brand || 'Custom Item',
                 qty: qty,
                 unitRate: rate,
                 gstPct: gst,
                 amount: amount,
-                mrp: product.mrp
+                mrp: item.mrp || product?.mrp || rate
             });
-
-            // Note: Not decrementing stock here yet as that requires Batch logic which is Phase 2/3.
-            // Using seed data purely for now. 
         }
 
         const netPayable = Math.round(subTotal + taxTotal);
         const paidAmount = req.body.paid !== undefined ? Number(req.body.paid) : netPayable;
         const balanceAmount = netPayable - paidAmount;
 
-        // Create invoice
-        const invoice = await Invoice.create({
-            patientName,
-            patientAddress: req.body.patientAddress,
-            admissionDate: req.body.admissionDate,
-            dischargeDate: req.body.dischargeDate,
-            roomNo: req.body.roomNo,
-            department: req.body.department,
-            diagnosis: req.body.diagnosis,
-            doctorName,
-            customerPhone,
-            items: processedItems,
-            subTotal,
-            taxTotal,
-            netPayable,
-            paid: paidAmount,
-            balance: balanceAmount > 0 ? balanceAmount : 0,
-            mode: mode || 'CASH',
-            createdBy: req.user._id,
-            notes,
-        });
+        let retries = 5;
+        let invoice;
+
+        while (retries > 0) {
+            try {
+                invoice = await Invoice.create({
+                    patientName,
+                    patientAddress: req.body.patientAddress,
+                    admissionDate: req.body.admissionDate,
+                    dischargeDate: req.body.dischargeDate,
+                    roomNo: req.body.roomNo,
+                    department: req.body.department,
+                    diagnosis: req.body.diagnosis,
+                    doctorName,
+                    customerPhone,
+                    items: processedItems,
+                    subTotal,
+                    taxTotal,
+                    netPayable,
+                    paid: paidAmount,
+                    balance: balanceAmount > 0 ? balanceAmount : 0,
+                    mode: mode || 'CASH',
+                    createdBy: req.user._id,
+                    notes,
+                });
+                break; // Success!
+            } catch (error) {
+                if (error.code === 11000 && retries > 1) {
+                    logger.warn(`Sequence collision detected, retrying... (${retries} attempts left)`);
+                    retries--;
+                    // Small delay to let the concurrent transaction finish if needed
+                    await new Promise(resolve => setTimeout(resolve, 50 * (6 - retries)));
+                    continue;
+                }
+                throw error;
+            }
+        }
 
         logger.info(`Invoice created: ${invoice.invoiceNo} by ${req.user.email}`);
 
@@ -309,5 +318,3 @@ export const getInvoiceByInvoiceId = async (req, res, next) => {
         next(error);
     }
 };
-
-
