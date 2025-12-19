@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import User from '../models/User.js';
 import logger from '../utils/logger.js';
 
@@ -16,21 +17,41 @@ export const protect = async (req, res, next) => {
             // Verify token
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-            // Get user from token
-            req.user = await User.findById(decoded.id).select('-password');
+            // Get user from token - wrapped in try-catch to distinguish DB errors from Auth errors
+            try {
+                // Check if database is connected first
+                if (mongoose.connection.readyState !== 1) {
+                    return res.status(503).json({
+                        message: 'Database connection unavailable',
+                        isDbError: true
+                    });
+                }
 
-            if (!req.user) {
-                return res.status(401).json({ message: 'User not found' });
+                req.user = await User.findById(decoded.id).select('-password');
+
+                if (!req.user) {
+                    return res.status(401).json({ message: 'User not found in system' });
+                }
+
+                if (!req.user.isActive) {
+                    return res.status(401).json({ message: 'User account is deactivated' });
+                }
+
+                next();
+            } catch (dbError) {
+                logger.error(`Database error in auth middleware: ${dbError.message}`);
+                return res.status(500).json({
+                    message: 'Internal server error during authentication',
+                    isDbError: true
+                });
             }
-
-            if (!req.user.isActive) {
-                return res.status(401).json({ message: 'User account is deactivated' });
-            }
-
-            next();
         } catch (error) {
-            logger.error(`Auth middleware error: ${error.message}`);
-            return res.status(401).json({ message: 'Not authorized, token failed' });
+            logger.error(`Auth token verification failed: ${error.message}`);
+            // Token errors (JsonWebTokenError, TokenExpiredError)
+            return res.status(401).json({
+                message: 'Not authorized, token failed',
+                isTokenExpired: error.name === 'TokenExpiredError'
+            });
         }
     }
 

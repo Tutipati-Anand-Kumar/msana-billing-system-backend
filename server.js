@@ -57,19 +57,51 @@ const connectToDatabase = async () => {
         return cachedDb;
     }
 
+    if (!process.env.MONGO_URI) {
+        const error = '❌ MONGO_URI is not defined in environment variables';
+        console.error(error);
+        logger.error(error);
+        throw new Error(error);
+    }
+
     const opts = {
         bufferCommands: false, // Disable Mongoose buffering
-        serverSelectionTimeoutMS: 30000, // Increased for slower local connections
+        serverSelectionTimeoutMS: 30000,
         connectTimeoutMS: 30000,
     };
+
+    // Connection Listeners
+    mongoose.connection.on('connected', () => {
+        logger.info('Mongoose connected to DB');
+    });
+
+    mongoose.connection.on('error', (err) => {
+        logger.error(`Mongoose connection error: ${err.message}`);
+        console.error('❌ Mongoose Runtime Error:', err);
+    });
+
+    mongoose.connection.on('disconnected', () => {
+        logger.warn('Mongoose disconnected');
+        console.log('⚠️ MongoDB Disconnected');
+    });
+
+    mongoose.connection.on('reconnected', () => {
+        logger.info('Mongoose reconnected');
+        console.log('✅ MongoDB Reconnected');
+    });
 
     try {
         const conn = await mongoose.connect(process.env.MONGO_URI, opts);
         cachedDb = conn.connection;
-        console.log('✅ MongoDB connected via Serverless Cached Connection');
+
+        const env = process.env.NODE_ENV || 'development';
+        const connectionType = process.env.VERCEL ? 'Serverless' : 'Standard';
+        console.log(`✅ MongoDB connected via ${connectionType} Connection (${env} mode)`);
+
         return cachedDb;
     } catch (err) {
         console.error('❌ MongoDB Connection Error:', err);
+        logger.error(`MongoDB Connection Error: ${err.message}`);
         throw err;
     }
 };
@@ -131,16 +163,31 @@ const getLocalIP = () => {
 
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 4000;
-    app.listen(PORT, '0.0.0.0', async () => {
-        const localIP = getLocalIP();
-        logger.info(`Server running on port ${PORT} in ${process.env.NODE_ENV} mode`);
-        console.log(`\n🚀 Server is running:`);
-        console.log(`   - Local:            http://localhost:${PORT}`);
-        console.log(`   - On Your Network:  http://${localIP}:${PORT}\n`);
 
-        await connectToDatabase();
-        initCronJobs();
-    });
+    const startServer = async () => {
+        try {
+            // 1. Connect to Database first
+            await connectToDatabase();
+
+            // 2. Start Listening after DB is ready
+            app.listen(PORT, '0.0.0.0', () => {
+                const localIP = getLocalIP();
+                logger.info(`Server running on port ${PORT} in ${process.env.NODE_ENV} mode`);
+                console.log(`\n🚀 Server is running:`);
+                console.log(`   - Local:            http://localhost:${PORT}`);
+                console.log(`   - On Your Network:  http://${localIP}:${PORT}\n`);
+
+                // 3. Initialize Cron Jobs
+                initCronJobs();
+                console.log('✅ Cron jobs initialized');
+            });
+        } catch (error) {
+            console.error('FAILED TO START SERVER:', error.message);
+            process.exit(1);
+        }
+    };
+
+    startServer();
 }
 
 // Export app for Vercel
